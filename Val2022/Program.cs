@@ -1,4 +1,6 @@
 ﻿using Qaplix.Val;
+using System.IO;
+using System.Security.Cryptography.X509Certificates;
 
 var baseUri = new Uri("https://resultat.val.se/resultatfiler/");
 var basePath = @"torsdag/slutlig/";
@@ -74,9 +76,11 @@ try
         .SelectMany(x => x.valdistrikt)
         .SelectMany(x => x.rostfordelning?.rosterPaverkaMandat.partiRoster ?? Enumerable.Empty<Partiroster>());
     var maxLen = partyVotes.Max(x => x.partibeteckning.Length);
-    foreach (var party in partyVotes.GroupBy(x => x.partibeteckning))
+    foreach (var party in partyVotes
+        .GroupBy(x => x.partikod)
+        .Select(x => (Info: x.First(), Votes: x.Sum(x => x.antalRoster))))
     {
-        Console.WriteLine($"{party.Key.PadRight(maxLen)} {party.Sum(x => x.antalRoster)}");
+        Console.WriteLine($"{party.Info.partiforkortning,4} {party.Votes,8} {party.Info.partibeteckning}");
     }
 }
 catch (Exception ex)
