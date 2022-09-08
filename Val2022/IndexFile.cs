@@ -1,4 +1,7 @@
-﻿namespace Qaplix.Val;
+﻿using System.Globalization;
+using System.Text;
+
+namespace Qaplix.Val;
 
 internal record IndexRecord(string Hash, string Path);
 
@@ -24,24 +27,38 @@ internal class IndexFile
 
     public static async Task<IEnumerable<IndexRecord>> ReconstructIndexAsync(string path)
     {
-        var dictionary = new Dictionary<(string Type, string Code), (DateTime Time, string Hash)>();
+        var dictionary = new Dictionary<(string Type, string Code, string Occasion), (DateTime Time, string Hash)>();
         foreach (var file in Directory.EnumerateFiles(path).Where(x => x.Length == 34))
         {
             (var id, var votes, var seats) = await Utils.ReadZipFileAsync(file);
             var updateTime = votes.senasteUppdateringstid < seats.senasteUppdateringstid ? seats.senasteUppdateringstid : votes.senasteUppdateringstid;
-            if (dictionary.TryGetValue((seats.valtyp, seats.valomrade.kod), out var pair))
+            if (dictionary.TryGetValue((seats.valtyp, seats.valomrade.kod, seats.rakningstillfalle), out var pair))
             {
                 if (pair.Time < seats.senasteUppdateringstid)
                 {
-                    dictionary[(seats.valtyp, seats.valomrade.kod)] = (seats.senasteUppdateringstid, file);
+                    dictionary[(seats.valtyp, seats.valomrade.kod, seats.rakningstillfalle)] = (seats.senasteUppdateringstid, file);
                 }
             }
             else
             {
-                dictionary[(seats.valtyp, seats.valomrade.kod)] = (seats.senasteUppdateringstid, file);
+                dictionary[(seats.valtyp, seats.valomrade.kod, seats.rakningstillfalle)] = (seats.senasteUppdateringstid, file);
             }
         }
-        return dictionary.Select(x => new IndexRecord(x.Value.Hash, $@"./p/{x.Key.Type}/Val_20220911_preliminar_{x.Key.Code}_{x.Key.Type}.zip"));
+        return dictionary.Select(x => new IndexRecord(x.Value.Hash, $@"./{x.Key.Occasion.Substring(0,1)}/{x.Key.Type}/Val_20220911_{RemoveDiacritics(x.Key.Occasion)}_{x.Key.Code}_{x.Key.Type}.zip"));
+    }
+
+    // https://blog.fredrikhaglund.se/blog/2008/04/16/how-to-remove-diacritic-marks-from-strings/
+    public static string RemoveDiacritics(string s)
+    {
+        var normalizedString = s.Normalize(NormalizationForm.FormD);
+        var stringBuilder = new StringBuilder();
+        for (int i = 0; i < normalizedString.Length; i++)
+        {
+            char c = normalizedString[i];
+            if (CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
+                stringBuilder.Append(c);
+        }
+        return stringBuilder.ToString();
     }
 
     public static void SaveReconstructedFiles(IEnumerable<IndexRecord> files, string path)
