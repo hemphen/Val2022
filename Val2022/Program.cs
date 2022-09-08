@@ -78,7 +78,8 @@ try
     var maxLen = partyVotes.Max(x => x.partibeteckning.Length);
     foreach (var party in partyVotes
         .GroupBy(x => x.partikod)
-        .Select(x => (Info: x.First(), Votes: x.Sum(x => x.antalRoster))))
+        .Select(x => (Info: x.First(), Votes: x.Sum(x => x.antalRoster)))
+        .OrderByDescending(x => x.Votes))
     {
         Console.WriteLine($"{party.Info.partiforkortning,4} {party.Votes,8} {party.Info.partibeteckning}");
     }
