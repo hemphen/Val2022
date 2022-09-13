@@ -9,7 +9,7 @@ public static class Program
     {
         [Option('w', "wednesday", Default = false, Required = false, HelpText = "Use wednesday votes from 2018 for uppsamlingsdistrikt.")]
         public bool UseWednesdayVotes { get; set; }
-        [Option('r', "rakningstillfalle", Default = "preliminär", Required = false, HelpText = "Use a specific räkningstillfälle, e.g. preliminär/slutlig.")]
+        [Value(0, Default = "preliminär", Required = false, HelpText = "Use a specific räkningstillfälle, e.g. preliminär/slutlig.")]
         public string? VoteCountOccasion { get; set; }
         [Option('f', "follow", Default = false, Required = false, HelpText = "Follow changes over time by re-running the analysis.")]
         public bool DoFollow { get; set; }
