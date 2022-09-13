@@ -1,27 +1,45 @@
-﻿using System.Diagnostics.Metrics;
-using System.IO;
+﻿using CommandLine;
+using System.Data;
 
 namespace Qaplix.Val;
 
 public static class Program
 {
-    public static async Task<int> Main(string[] args)
+    public class Options
     {
-        var baseUri = new Uri("https://resultat.val.se/resultatfiler/");
-        var basePath = @"valdagen/";
-        var rakningstillfalle = args.Length == 1 ? args[0] : "preliminär";
-
-        var metaData = new ElectionMetaData();
-
-        while (true)
-        {
-            (var voteMap, var seatMap) = await FetchAndProcess(baseUri, basePath, rakningstillfalle);
-            AnalyzeAndPrint(metaData, voteMap);
-            await Task.Delay(30000);
-        }
+        [Option('w', "wednesday", Default = false, Required = false, HelpText = "Use wednesday votes from 2018 for uppsamlingsdistrikt.")]
+        public bool UseWednesdayVotes { get; set; }
+        [Option('r', "rakningstillfalle", Default = "preliminär", Required = false, HelpText = "Use a specific räkningstillfälle, e.g. preliminär/slutlig.")]
+        public string? VoteCountOccasion { get; set; }
+        [Option('f', "follow", Default = false, Required = false, HelpText = "Follow changes over time by re-running the analysis.")]
+        public bool DoFollow { get; set; }
+        [Option('d', "delay", Default = 30, Required = false, HelpText = "Delay between re-runs in seconds.")]
+        public int Delay { get; set; }
+        [Option('u', "url", Default = "https://resultat.val.se/resultatfiler/", Required = false, HelpText = "Base URL for result files.")]
+        public string? Uri { get; set; }
+        [Option('p', "path", Default = "results", Required = false, HelpText = "Path to result files.")]
+        public string? BasePath { get; set; }
     }
 
-    private static void AnalyzeAndPrint(ElectionMetaData metaData, Dictionary<string, RostData> voteMap)
+    public static async Task Main(string[] args)
+    {
+        var options = await Parser.Default.ParseArguments<Options>(args)
+            .WithParsedAsync(Run);
+    }
+
+    public static async Task Run(Options options)
+    {
+        var metaData = new ElectionMetaData();
+        do
+        {
+            (var voteMap, var seatMap) = await FetchAndProcess(new Uri(options.Uri!), options.BasePath!, options.VoteCountOccasion!);
+            AnalyzeAndPrint(metaData, voteMap, options.UseWednesdayVotes);
+            if (options.DoFollow)
+                await Task.Delay(options.Delay*1000);
+        } while (options.DoFollow);
+    }
+
+    private static void AnalyzeAndPrint(ElectionMetaData metaData, Dictionary<string, RostData> voteMap, bool useWednesdayVotes)
     {
         var stateVotes = voteMap.Values.Where(x => x.valtyp == "RD");
         try
@@ -29,8 +47,7 @@ public static class Program
             var allDistricts = stateVotes.SelectMany(x => x.valdistrikt);
             var votesData = CalcVotes(allDistricts);
 
-            var includeOnsdagsVotes2018 = false;
-            if (includeOnsdagsVotes2018)
+            if (useWednesdayVotes)
             {
                 votesData = AdjustForOnsdagsVotes2018(votesData);
             }
