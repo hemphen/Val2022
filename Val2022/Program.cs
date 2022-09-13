@@ -1,90 +1,217 @@
-﻿using Qaplix.Val;
+﻿using System.Diagnostics.Metrics;
 using System.IO;
-using System.Security.Cryptography.X509Certificates;
 
-var baseUri = new Uri("https://resultat.val.se/resultatfiler/");
-var basePath = @"torsdag/slutlig/";
-var rakningstillfalle = "slutlig";
+namespace Qaplix.Val;
 
-var voteMap = new Dictionary<string, RostData>();
-var seatMap = new Dictionary<string, MandatData>();
-
-Directory.CreateDirectory(basePath);
-
-List<IndexRecord>? files = null;
-try
+public static class Program
 {
-    files = (await IndexFile.GetIndexAsync(baseUri)).ToList();
-    IndexFile.SaveIndexFile(files, basePath);
-}
-catch(Exception ex)
-{
-    Console.WriteLine(ex.Message);
-    // Reconstruct latest index data from files if index file is empty - only used when playing around before the election
-    Console.WriteLine("No files on site");
-    if (files==null || files?.Count < 3)
+    public static async Task<int> Main(string[] args)
     {
-        files = (await IndexFile.ReconstructIndexAsync(basePath)).ToList();
-        IndexFile.SaveReconstructedFiles(files, Path.Combine(basePath, "reconstructed"));
-    }
-}
+        var baseUri = new Uri("https://resultat.val.se/resultatfiler/");
+        var basePath = @"valdagen/";
+        var rakningstillfalle = args.Length == 1 ? args[0] : "preliminär";
 
-foreach (var line in files)
-{
-    var path = Path.Combine(basePath, line.Hash);
-    if (!File.Exists(path))
-    {
-        Console.WriteLine($"Downloading {line.Path}");
-        await Utils.SaveFileAsync(baseUri, line.Path, path);
+        var metaData = new ElectionMetaData();
+
+        while (true)
+        {
+            (var voteMap, var seatMap) = await FetchAndProcess(baseUri, basePath, rakningstillfalle);
+            AnalyzeAndPrint(metaData, voteMap);
+            await Task.Delay(30000);
+        }
     }
 
-    var districtData = await Utils.ReadZipFileAsync(path);
-    if (districtData.Seats.rakningstillfalle == rakningstillfalle)
+    private static void AnalyzeAndPrint(ElectionMetaData metaData, Dictionary<string, RostData> voteMap)
     {
-        voteMap.Add(districtData.District.kod, districtData.Votes);
-        seatMap.Add(districtData.District.kod, districtData.Seats);
-    }
-}
+        var stateVotes = voteMap.Values.Where(x => x.valtyp == "RD");
+        try
+        {
+            var allDistricts = stateVotes.SelectMany(x => x.valdistrikt);
+            var votesData = CalcVotes(allDistricts);
 
-var state = seatMap.Values.Where(x => x.valtyp == "RD");
-try
-{
-    Console.WriteLine("\nMandatfördelning");
-    foreach (var party in state
-        .SelectMany(x => x.valomrade.mandatfordelning?.partiLista ?? Enumerable.Empty<Partilista>())
-        .GroupBy(x => x.partiforkortning))
-    {
-        Console.WriteLine($"{party.Key} {party.Sum(x => x.antalMandat)}");
+            var includeOnsdagsVotes2018 = false;
+            if (includeOnsdagsVotes2018)
+            {
+                votesData = AdjustForOnsdagsVotes2018(votesData);
+            }
+
+            var popularParties = votesData
+                .PartyVotes
+                .OrderByDescending(x => x.Value)
+                .Take(10)
+                .Select(x => metaData.Parties[x.Key])
+                .ToList();
+
+            Console.WriteLine("\nVotes\n");
+            AnalyzeAndPrintVotes(metaData, allDistricts, votesData, popularParties);
+
+            Console.WriteLine("\nSeats\n");
+            AnalyzeAndPrintMandates(metaData, votesData, popularParties);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not list votesData data: {ex.Message}");
+        }
+
     }
 
-    Console.WriteLine("\nRäknade distrikt");
-    foreach (var region in seatMap.Values.Where(x => x.valtyp == "RD"))
+    private static void AnalyzeAndPrintVotes(ElectionMetaData metaData, IEnumerable<Valdistrikt> districts, VotesData votesData, List<PartyData> parties)
     {
-        Console.WriteLine($"{region.valtyp} {region.valomrade.kod} {region.valomrade.namn} {region.valomrade.antalValdistriktRaknade}/{region.valomrade.antalValdistriktSomSkaRaknas}");
-    }
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"\nCould not list seat data: {ex.Message}");
-}
+        foreach (var party in votesData.PartyVotes.Select(x => (Info: metaData.Parties[x.Key], Votes: x.Value)))
+        {
+            Console.WriteLine($"{party.Info.Abbreviation,4} {party.Votes,8} {party.Info.Name}");
+        }
 
-var stateVotes = voteMap.Values.Where(x => x.valtyp == "RD");
-try
-{
-    Console.WriteLine("\nRäknade distrikt");
-    var partyVotes = stateVotes
-        .SelectMany(x => x.valdistrikt)
-        .SelectMany(x => x.rostfordelning?.rosterPaverkaMandat.partiRoster ?? Enumerable.Empty<Partiroster>());
-    var maxLen = partyVotes.Max(x => x.partibeteckning.Length);
-    foreach (var party in partyVotes
-        .GroupBy(x => x.partikod)
-        .Select(x => (Info: x.First(), Votes: x.Sum(x => x.antalRoster)))
-        .OrderByDescending(x => x.Votes))
-    {
-        Console.WriteLine($"{party.Info.partiforkortning,4} {party.Votes,8} {party.Info.partibeteckning}");
+        PrintHeader(parties);
+
+        foreach (var region in districts.GroupBy(x => x.lankod))
+        {
+            PrintCount(CalcVotes(region), parties, metaData.Districts[region.Key]);
+        }
+
+        PrintCount(votesData, parties, "TOTALT");
     }
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"Could not list votes data: {ex.Message}");
+
+    private static void AnalyzeAndPrintMandates(ElectionMetaData metaData, VotesData votesData, IEnumerable<PartyData> parties)
+    {
+        double DelningsTal(int numSeats) => numSeats == 0 ? 1.2 : numSeats * 2 + 1;
+
+        var eligibleParties = votesData.PartyVotes.Where(x => x.Value / (double)votesData.TotalVotes > 0.04);
+        var seats = eligibleParties.ToDictionary(x => x.Key, x => 0);
+        for (int i = 0; i < 349; i++)
+        {
+            var nextSeat = eligibleParties.Select(x => (PartyCode: x.Key, Value: x.Value / DelningsTal(seats[x.Key]))).OrderByDescending(x => x.Value).ToList();
+            if (i > 340)
+            {
+                Console.WriteLine($"{metaData.Abbreviate(nextSeat[0].PartyCode),2} före {metaData.Abbreviate(nextSeat[1].PartyCode),2}: {nextSeat[0].Value:0.0} vs. {nextSeat[1].Value:0.0}");
+            }
+            seats[nextSeat[0].PartyCode] = seats[nextSeat[0].PartyCode] + 1;
+        }
+
+        var jamforelseTal = eligibleParties
+            .Select(x => (PartyCode: x.Key, Value: x.Value / DelningsTal(seats[x.Key])))
+            .OrderByDescending(x => x.Value)
+            .Select(x => $"{metaData.Abbreviate(x.PartyCode),2}: {x.Value:0.0}");
+        Console.WriteLine($"        {string.Join(", ", jamforelseTal)}");
+
+        PrintHeader(parties);
+
+        Console.Write($"{"MANDAT",20}");
+        foreach (var party in parties)
+        {
+            Console.Write($"|{(seats.TryGetValue(party.Code, out var mandat) ? mandat : 0),7} ");
+        }
+        Console.WriteLine("|");
+
+        var blocks = new List<(string Block, string[] Abbreviations)> {
+                ("Vänstern      ", new[] { "S", "C", "V", "MP" }),
+                ("Högern        ", new[] { "M", "L", "KD", "SD" }),
+                ("Alliansen     ", new[] { "M", "L", "KD", "C" }),
+                ("Far right     ", new[] { "M", "KD", "SD" }),
+                ("Gamla vänstern", new[] { "S", "V", "MP" })
+            }
+        .Select(x => (x.Block, PartyCodes: x.Abbreviations.Select(metaData.GetPartyCode).ToList()));
+
+        foreach (var item in blocks)
+        {
+            var votes = votesData.PartyVotes.Where(x => item.PartyCodes.Contains(x.Key)).Sum(x => x.Value);
+            var mandat = seats.Where(x => item.PartyCodes.Contains(x.Key)).Sum(x => x.Value);
+            Console.WriteLine($"{item.Block}: {votes / (double)votesData.TotalVotes:#.00%} ({mandat})");
+        };
+    }
+    static async Task<(Dictionary<string, RostData>, Dictionary<string, MandatData>)> FetchAndProcess(Uri baseUri, string basePath, string rakningstillfalle)
+    {
+        var voteMap = new Dictionary<string, RostData>();
+        var seatMap = new Dictionary<string, MandatData>();
+
+        Directory.CreateDirectory(basePath);
+
+        List<IndexRecord>? files = null;
+        try
+        {
+            files = (await IndexFile.GetIndexAsync(baseUri)).ToList();
+            IndexFile.SaveIndexFile(files, basePath);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.Message);
+            // Reconstruct latest index data from files if index file is empty - only used when playing around before the election
+            Console.WriteLine("No files on site");
+            if (files == null || files?.Count < 3)
+            {
+                files = (await IndexFile.ReconstructIndexAsync(basePath)).ToList();
+                IndexFile.SaveReconstructedFiles(files, Path.Combine(basePath, "reconstructed"));
+            }
+        }
+        if (files == null)
+            throw new InvalidDataException("No data");
+
+        foreach (var line in files)
+        {
+            var path = Path.Combine(basePath, line.Hash);
+            if (!File.Exists(path))
+            {
+                Console.WriteLine($"Downloading {line.Path}");
+                await Utils.SaveFileAsync(baseUri, line.Path, path);
+            }
+
+            var districtData = await Utils.ReadZipFileAsync(path);
+            if (districtData.Seats.rakningstillfalle == rakningstillfalle)
+            {
+                voteMap.Add(districtData.District.kod, districtData.Votes);
+                seatMap.Add(districtData.District.kod, districtData.Seats);
+            }
+        }
+
+        return (voteMap, seatMap);
+    }
+
+    record VotesData(Dictionary<string, int> PartyVotes, int TotalVotes, int TotalDistricts, int CountedDistricts);
+    private static VotesData CalcVotes(IEnumerable<Valdistrikt> districts)
+    {
+        var votecount = districts.SelectMany(y => y.rostfordelning?.rosterPaverkaMandat.partiRoster ?? Enumerable.Empty<Partiroster>());
+        var partyVotes = votecount.GroupBy(x => x.partikod).ToDictionary(x => x.Key, x => x.Sum(y => y.antalRoster));
+        var countedDistricts = districts.Count(x => !string.IsNullOrEmpty(x.rapporteringsTid));
+        var numDistricts = districts.Count();
+
+        var totalVotes = votecount.Sum(x => x.antalRoster) + districts.Sum(x => x.rostfordelning?.rosterEjPaverkaMandat.antalRoster ?? 0);
+
+        return new VotesData(partyVotes, totalVotes, numDistricts, countedDistricts);
+    }
+
+    private static VotesData AdjustForOnsdagsVotes2018(VotesData votesData)
+    {
+        var onsdagsVotes = new List<(string Partikod, int Votes)> {
+                ("0002", 47544), ("0004", 18407), ("0055", 13655), ("0005", 20403),
+                ("0001", 43088), ("0003", 11862), ("0068", 10294), ("0110", 30147)
+            }
+        .ToDictionary(x => x.Partikod, x => x.Votes);
+
+        var modifiedPartyVotes = votesData.PartyVotes
+            .ToDictionary(x => x.Key, x => x.Value + (onsdagsVotes.TryGetValue(x.Key, out var adjustment) ? adjustment : 0));
+        var modifiedTotalVotes = votesData.TotalVotes + onsdagsVotes.Values.Sum();
+
+        return votesData with { PartyVotes = modifiedPartyVotes, TotalVotes = modifiedTotalVotes };
+    }
+
+    private static void PrintHeader(IEnumerable<PartyData> parties)
+    {
+        Console.Write($"{" ",20}");
+        foreach (var party in parties)
+        {
+            Console.Write($"| {party.Abbreviation,6} ");
+        }
+        Console.WriteLine("|");
+    }
+
+    private static void PrintCount(VotesData votesData, IEnumerable<PartyData> parties, string header)
+    {
+        Console.Write($"{header,20}");
+        foreach (var party in parties)
+        {
+            Console.Write($"|{(votesData.PartyVotes.TryGetValue(party.Code, out var voteCount) ? voteCount / (double)votesData.TotalVotes : 0),7:#.0%} ");
+        }
+        Console.WriteLine($"| {votesData.CountedDistricts,4}/{votesData.TotalDistricts,4}");
+    }
+
 }
