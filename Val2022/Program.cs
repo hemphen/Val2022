@@ -30,12 +30,22 @@ public static class Program
     public static async Task Run(Options options)
     {
         var metaData = new ElectionMetaData();
+        var indexFile = new IndexFile(new Uri(options.Uri!), options.BasePath!);
+        
         do
         {
-            (var voteMap, var seatMap) = await FetchAndProcess(new Uri(options.Uri!), options.BasePath!, options.VoteCountOccasion!);
-            AnalyzeAndPrint(metaData, voteMap, options.UseWednesdayVotes);
+            if (await indexFile.RefreshAsync())
+            {
+                Console.WriteLine($"Updating @ {DateTime.Now.ToLongTimeString()}");
+                (var voteMap, var seatMap) = await FetchAndProcess(indexFile, options.VoteCountOccasion!);
+                AnalyzeAndPrint(metaData, voteMap, options.UseWednesdayVotes);
+                Console.WriteLine($"Updated @ {DateTime.Now.ToLongTimeString()}");
+            }
             if (options.DoFollow)
-                await Task.Delay(options.Delay*1000);
+            {
+                await Task.Delay(options.Delay * 1000);
+                Console.Write('.');
+            }
         } while (options.DoFollow);
     }
 
@@ -136,49 +146,22 @@ public static class Program
             Console.WriteLine($"{item.Block}: {votes / (double)votesData.TotalVotes:#.00%} ({mandat})");
         };
     }
-    static async Task<(Dictionary<string, RostData>, Dictionary<string, MandatData>)> FetchAndProcess(Uri baseUri, string basePath, string rakningstillfalle)
+    static async Task<(Dictionary<string, RostData>, Dictionary<string, MandatData>)> FetchAndProcess(IndexFile baseUri, string rakningstillfalle)
     {
         var voteMap = new Dictionary<string, RostData>();
         var seatMap = new Dictionary<string, MandatData>();
 
-        Directory.CreateDirectory(basePath);
-
-        List<IndexRecord>? files = null;
-        try
-        {
-            files = (await IndexFile.GetIndexAsync(baseUri)).ToList();
-            IndexFile.SaveIndexFile(files, basePath);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine(ex.Message);
-            // Reconstruct latest index data from files if index file is empty - only used when playing around before the election
-            Console.WriteLine("No files on site");
-            if (files == null || files?.Count < 3)
-            {
-                files = (await IndexFile.ReconstructIndexAsync(basePath)).ToList();
-                IndexFile.SaveReconstructedFiles(files, Path.Combine(basePath, "reconstructed"));
-            }
-        }
-        if (files == null)
-            throw new InvalidDataException("No data");
-
-        foreach (var line in files)
-        {
-            var path = Path.Combine(basePath, line.Hash);
-            if (!File.Exists(path))
-            {
-                Console.WriteLine($"Downloading {line.Path}");
-                await Utils.SaveFileAsync(baseUri, line.Path, path);
-            }
-
-            var districtData = await Utils.ReadZipFileAsync(path);
+        Console.Write("Processing");
+        await foreach (var districtData in baseUri.GetDistrictsAsync())
+        { 
             if (districtData.Seats.rakningstillfalle == rakningstillfalle)
             {
                 voteMap.Add(districtData.District.kod, districtData.Votes);
                 seatMap.Add(districtData.District.kod, districtData.Seats);
             }
+            Console.Write(".");
         }
+        Console.WriteLine("Done");
 
         return (voteMap, seatMap);
     }

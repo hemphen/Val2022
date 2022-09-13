@@ -1,20 +1,108 @@
 ﻿using System.Globalization;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 
 namespace Qaplix.Val;
 
 internal record IndexRecord(string Hash, string Path);
+internal record DistrictData(Valomrade District, RostData Votes, MandatData Seats);
 
 internal class IndexFile
 {
-    public static async Task<IEnumerable<IndexRecord>> GetIndexAsync(Uri baseUri)
+    private EntityTagHeaderValue? _etag = null;
+    private Uri _baseUri { get; }
+    private string _basePath { get; }
+
+    private List<IndexRecord>? _indexCache;
+    private Dictionary<string, DistrictData> _dataCache = new Dictionary<string, DistrictData>();
+
+    public IEnumerable<IndexRecord> Data => _indexCache?.AsEnumerable() ?? throw new InvalidDataException("No data available");
+    public bool HasData => _indexCache != null;
+
+    public IndexFile(Uri baseUri, string basePath)
+    {
+        _baseUri = baseUri;
+        _basePath = basePath;
+    }
+
+    public async Task<bool> RefreshAsync()
+    {
+        if (await RefreshIndexAsync())
+        {
+            var updated = await RefreshFilesAsync();
+            return updated.Any();
+        }
+        return false;
+    }
+
+    private async Task<IEnumerable<IndexRecord>> RefreshFilesAsync()
+    {
+        Directory.CreateDirectory(_basePath);
+
+        if (!HasData) throw new InvalidDataException("No data");
+
+        var updatedRecords = new List<IndexRecord>();
+        foreach (var record in Data)
+        {
+            var path = Path.Combine(_basePath, record.Hash);
+            if (!File.Exists(path))
+            {
+                Console.WriteLine($"Downloading {record.Path}");
+                await SaveFileAsync(_baseUri, record.Path, path);
+                updatedRecords.Add(record);
+            }
+        }
+        return updatedRecords;
+    }
+
+    public async IAsyncEnumerable<DistrictData> GetDistrictsAsync()
+    {
+        foreach (var record in Data)
+        {
+            if (!_dataCache.TryGetValue(record.Hash, out var districtData))
+            {
+                districtData = await ReadZipFileAsync(Path.Combine(_basePath, record.Hash));
+                _dataCache.Add(record.Hash, districtData);
+            }
+            yield return districtData;
+        }
+    }
+
+    private static async Task SaveFileAsync(Uri baseUri, string relativeUrl, string file)
     {
         var httpClient = new HttpClient();
-        var res = await httpClient.GetAsync(new Uri(baseUri, "index.md5"));
-        var content = await res.Content.ReadAsStringAsync();
-        int i = 0;
+        var url = new Uri(baseUri, relativeUrl);
+        var res = await httpClient.GetAsync(url);
+        if (res.IsSuccessStatusCode)
+        {
+            var httpBuf = await res.Content.ReadAsByteArrayAsync();
+            await File.WriteAllBytesAsync(file, httpBuf);
+        }
+    }
 
-        return content
+    private async Task<bool> RefreshIndexAsync()
+    {
+        var httpClient = new HttpClient();
+        var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, "index.md5"));
+        if (_etag!=null)
+        {
+            request.Headers.IfNoneMatch.Add(_etag);
+        }
+        var response = await httpClient.SendAsync(request);
+
+        if (response.StatusCode == HttpStatusCode.NotModified)
+            return false; // No changes
+
+        // Throw on error
+        response.EnsureSuccessStatusCode();
+
+        var content = await response.Content.ReadAsStringAsync();
+
+        _etag = response.Headers.ETag;
+        _indexCache = content
             .Split("\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(line =>
             {
@@ -22,7 +110,24 @@ internal class IndexFile
                 if (parts.Length != 2) throw new InvalidDataException($"Entry does not have two parts: {line}");
                 if (parts[1] == "-") throw new InvalidDataException("Missing file name");
                 return new IndexRecord(parts[0], parts[1]);
-            });
+            })
+            .ToList();
+
+        if (_etag != null)
+            Console.WriteLine($"Saving index file for etag ${_etag}");
+        SaveIndexFile(_indexCache, _basePath);
+
+        // Rewrite the cache to throw away all updated items
+        var newCache = new Dictionary<string, DistrictData>();
+        foreach (var item in _indexCache)
+        {
+            if (_dataCache.TryGetValue(item.Hash, out var districtData)) 
+            {
+                newCache.Add(item.Hash, districtData);
+            }
+        }
+        _dataCache = newCache;
+        return true;
     }
 
     public static async Task<IEnumerable<IndexRecord>> ReconstructIndexAsync(string path)
@@ -30,7 +135,7 @@ internal class IndexFile
         var dictionary = new Dictionary<(string Type, string Code, string Occasion), (DateTime Time, string Hash)>();
         foreach (var file in Directory.EnumerateFiles(path).Where(x => x.Length == 34))
         {
-            (var id, var votes, var seats) = await Utils.ReadZipFileAsync(file);
+            (var id, var votes, var seats) = await ReadZipFileAsync(file);
             var updateTime = votes.senasteUppdateringstid < seats.senasteUppdateringstid ? seats.senasteUppdateringstid : votes.senasteUppdateringstid;
             if (dictionary.TryGetValue((seats.valtyp, seats.valomrade.kod, seats.rakningstillfalle), out var pair))
             {
@@ -77,5 +182,44 @@ internal class IndexFile
     public static void SaveIndexFile(IEnumerable<IndexRecord> files, string path)
     {
         File.WriteAllLines(Path.Combine(path, "index.md5"), files.Select(file => $"{file.Hash} {file.Path}"));
+    }
+
+    private async static Task<DistrictData> ReadZipFileAsync(string file)
+    {
+        var stream = File.OpenRead(file);
+        ZipArchive zip;
+        try
+        {
+            zip = new ZipArchive(stream);
+        }
+        catch
+        {
+            throw;
+        }
+
+        RostData? voteData = null;
+        MandatData? seatData = null;
+
+        foreach (var entry in zip.Entries.Where(x => x.Name.EndsWith("json")))
+        {
+            var zipStream = entry.Open();
+            if (entry.Name.Contains("rostfordelning"))
+            {
+                if (voteData != null)
+                    throw new InvalidDataException("Duplicate vote data in file.");
+                voteData = await JsonSerializer.DeserializeAsync<RostData>(zipStream);
+            }
+            else
+            {
+                if (seatData != null)
+                    throw new InvalidDataException("Duplicate vote data in file.");
+                seatData = await JsonSerializer.DeserializeAsync<MandatData>(zipStream);
+            }
+        }
+
+        if (voteData == null) throw new InvalidDataException("Vote data missing from file.");
+        if (seatData == null) throw new InvalidDataException("Seat data missing from file.");
+
+        return new DistrictData(seatData.valomrade, voteData, seatData);
     }
 }
