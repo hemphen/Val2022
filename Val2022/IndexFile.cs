@@ -40,8 +40,6 @@ internal class IndexFile
 
     private async Task<IEnumerable<IndexRecord>> RefreshFilesAsync()
     {
-        Directory.CreateDirectory(_basePath);
-
         if (!HasData) throw new InvalidDataException("No data");
 
         var updatedRecords = new List<IndexRecord>();
@@ -179,6 +177,7 @@ internal class IndexFile
 
     public static void SaveIndexFile(IEnumerable<IndexRecord> files, string path)
     {
+	Directory.CreateDirectory(path);
         File.WriteAllLines(Path.Combine(path, "index.md5"), files.Select(file => $"{file.Hash} {file.Path}"));
     }
 
