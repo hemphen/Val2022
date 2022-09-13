@@ -113,11 +113,9 @@ internal class IndexFile
             })
             .ToList();
 
-        if (_etag != null)
-            Console.WriteLine($"Saving index file for etag ${_etag}");
         SaveIndexFile(_indexCache, _basePath);
 
-        // Rewrite the cache to throw away all updated items
+        // Rewrite the cache to throw away all outdated items
         var newCache = new Dictionary<string, DistrictData>();
         foreach (var item in _indexCache)
         {

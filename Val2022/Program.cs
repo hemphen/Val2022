@@ -31,11 +31,12 @@ public static class Program
     {
         var metaData = new ElectionMetaData();
         var indexFile = new IndexFile(new Uri(options.Uri!), options.BasePath!);
-        
+        bool first = true;
         do
         {
-            if (await indexFile.RefreshAsync())
+            if (await indexFile.RefreshAsync() || first)
             {
+                first = false;
                 Console.WriteLine($"Updating @ {DateTime.Now.ToLongTimeString()}");
                 (var voteMap, var seatMap) = await FetchAndProcess(indexFile, options.VoteCountOccasion!);
                 AnalyzeAndPrint(metaData, voteMap, options.UseWednesdayVotes);
