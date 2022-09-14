@@ -19,6 +19,12 @@ public static class Program
         public string? Uri { get; set; }
         [Option('p', "path", Default = "results", Required = false, HelpText = "Path to result files.")]
         public string? BasePath { get; set; }
+        [Option('e', "election", Default = "RD", Required = false, HelpText = "Election type, e.g. RD/RF/KF.")]
+        public string? Election { get; set; }
+        [Option('l', "level", Default = 1, Required = false, HelpText = "Grouping level 0-3")]
+        public int Level { get; set; }
+        [Option('s', "uppsamlingsdistrikt", Default = false, Required = false, HelpText = "Show only uppsamlingsdistrikt")] 
+        public bool Uppsamlingsdistrikt { get; set; }
     }
 
     public static async Task Main(string[] args)
@@ -29,7 +35,7 @@ public static class Program
 
     public static async Task Run(Options options)
     {
-        var metaData = new ElectionMetaData();
+        var metaDataLoader = new ElectionMetaDataLoader();
         var indexFile = new IndexFile(new Uri(options.Uri!), options.BasePath!);
         bool first = true;
         do
@@ -39,7 +45,15 @@ public static class Program
                 first = false;
                 Console.WriteLine($"Updating @ {DateTime.Now.ToLongTimeString()}");
                 (var voteMap, var seatMap) = await FetchAndProcess(indexFile, options.VoteCountOccasion!);
-                AnalyzeAndPrint(metaData, voteMap, options.UseWednesdayVotes);
+
+                var votes = voteMap.Values
+                    .Where(x => x.valtyp == options.Election)
+                    .SelectMany(x => x.valdistrikt)
+                    .Where(x => !options.Uppsamlingsdistrikt || x.valdistriktstyp=="uppsamlingsdistrikt");
+
+                var metaData = metaDataLoader.Elections[options.Election!];
+
+                AnalyzeAndPrint(metaData, options.Level, votes, options.UseWednesdayVotes);
                 Console.WriteLine($"Updated @ {DateTime.Now.ToLongTimeString()}");
             }
             if (options.DoFollow)
@@ -50,12 +64,10 @@ public static class Program
         } while (options.DoFollow);
     }
 
-    private static void AnalyzeAndPrint(ElectionMetaData metaData, Dictionary<string, RostData> voteMap, bool useWednesdayVotes)
+    private static void AnalyzeAndPrint(ElectionMetaData metaData, int level, IEnumerable<Valdistrikt> allDistricts, bool useWednesdayVotes)
     {
-        var stateVotes = voteMap.Values.Where(x => x.valtyp == "RD");
         try
         {
-            var allDistricts = stateVotes.SelectMany(x => x.valdistrikt);
             var votesData = CalcVotes(allDistricts);
 
             if (useWednesdayVotes)
@@ -71,7 +83,10 @@ public static class Program
                 .ToList();
 
             Console.WriteLine("\nVotes\n");
-            AnalyzeAndPrintVotes(metaData, allDistricts, votesData, popularParties);
+            AnalyzeAndPrintVotes(metaData, level, allDistricts, popularParties);
+
+            Console.WriteLine("\nUppsamling\n");
+            AnalyzeAndPrintVotes(metaData, 0, allDistricts.Where(x => x.valdistriktstyp=="uppsamlingsdistrikt"), popularParties);
 
             Console.WriteLine("\nSeats\n");
             AnalyzeAndPrintMandates(metaData, votesData, popularParties);
@@ -83,21 +98,17 @@ public static class Program
 
     }
 
-    private static void AnalyzeAndPrintVotes(ElectionMetaData metaData, IEnumerable<Valdistrikt> districts, VotesData votesData, List<PartyData> parties)
+    private static void AnalyzeAndPrintVotes(ElectionMetaData metaData, int level, IEnumerable<Valdistrikt> districts, List<PartyData> parties)
     {
-        foreach (var party in votesData.PartyVotes.Select(x => (Info: metaData.Parties[x.Key], Votes: x.Value)))
-        {
-            Console.WriteLine($"{party.Info.Abbreviation,4} {party.Votes,8} {party.Info.Name}");
-        }
-
         PrintHeader(parties);
 
-        foreach (var region in districts.GroupBy(x => x.lankod))
+        var granularity = metaData.Levels[level];
+        foreach (var region in districts.GroupBy(granularity.Grouping))
         {
-            PrintCount(CalcVotes(region), parties, metaData.Districts[region.Key]);
+            PrintCount(CalcVotes(region), parties, granularity.Names[region.Key]);
         }
 
-        PrintCount(votesData, parties, "TOTALT");
+        PrintCount(CalcVotes(districts), parties, "TOTALT");
     }
 
     private static void AnalyzeAndPrintMandates(ElectionMetaData metaData, VotesData votesData, IEnumerable<PartyData> parties)
@@ -106,6 +117,11 @@ public static class Program
 
         var eligibleParties = votesData.PartyVotes.Where(x => x.Value / (double)votesData.TotalVotes > 0.04);
         var seats = eligibleParties.ToDictionary(x => x.Key, x => 0);
+        if (seats.Count == 0)
+        {
+            Console.WriteLine("No eligible parties, i.e. no votes yet counted.");
+            return;
+        }
         for (int i = 0; i < 349; i++)
         {
             var nextSeat = eligibleParties.Select(x => (PartyCode: x.Key, Value: x.Value / DelningsTal(seats[x.Key]))).OrderByDescending(x => x.Value).ToList();
@@ -153,6 +169,7 @@ public static class Program
         var seatMap = new Dictionary<string, MandatData>();
 
         Console.Write("Processing");
+        var i = 0;
         await foreach (var districtData in baseUri.GetDistrictsAsync())
         { 
             if (districtData.Seats.rakningstillfalle == rakningstillfalle)
@@ -160,7 +177,8 @@ public static class Program
                 voteMap.Add(districtData.District.kod, districtData.Votes);
                 seatMap.Add(districtData.District.kod, districtData.Seats);
             }
-            Console.Write(".");
+            if (++i%10==0)
+                Console.Write(".");
         }
         Console.WriteLine("Done");
 
