@@ -23,8 +23,8 @@ public static class Program
         public string? Election { get; set; }
         [Option('l', "level", Default = 1, Required = false, HelpText = "Grouping level 0-3")]
         public int Level { get; set; }
-        [Option('s', "uppsamlingsdistrikt", Default = false, Required = false, HelpText = "Show only uppsamlingsdistrikt")] 
-        public bool Uppsamlingsdistrikt { get; set; }
+        [Option('s', "uppsamlingsdistrikt", Default = -1, Required = false, HelpText = "Level for uppsamlingsdistrikt")]
+        public int LevelUppsamling { get; set; }
     }
 
     public static async Task Main(string[] args)
@@ -48,12 +48,11 @@ public static class Program
 
                 var votes = voteMap.Values
                     .Where(x => x.valtyp == options.Election)
-                    .SelectMany(x => x.valdistrikt)
-                    .Where(x => !options.Uppsamlingsdistrikt || x.valdistriktstyp=="uppsamlingsdistrikt");
+                    .SelectMany(x => x.valdistrikt);
 
                 var metaData = metaDataLoader.Elections[options.Election!];
 
-                AnalyzeAndPrint(metaData, options.Level, votes, options.UseWednesdayVotes);
+                AnalyzeAndPrint(metaData, options.Level, votes, options.UseWednesdayVotes, options.LevelUppsamling);
                 Console.WriteLine($"Updated @ {DateTime.Now.ToLongTimeString()}");
             }
             if (options.DoFollow)
@@ -64,7 +63,7 @@ public static class Program
         } while (options.DoFollow);
     }
 
-    private static void AnalyzeAndPrint(ElectionMetaData metaData, int level, IEnumerable<Valdistrikt> allDistricts, bool useWednesdayVotes)
+    private static void AnalyzeAndPrint(ElectionMetaData metaData, int level, IEnumerable<Valdistrikt> allDistricts, bool useWednesdayVotes, int levelUppsamling)
     {
         try
         {
@@ -82,11 +81,17 @@ public static class Program
                 .Select(x => metaData.Parties[x.Key])
                 .ToList();
 
-            Console.WriteLine("\nVotes\n");
-            AnalyzeAndPrintVotes(metaData, level, allDistricts, popularParties);
+            if (level >= 0)
+            {
+                Console.WriteLine("\nVotes\n");
+                AnalyzeAndPrintVotes(metaData, level, allDistricts, popularParties);
+            }
 
-            Console.WriteLine("\nUppsamling\n");
-            AnalyzeAndPrintVotes(metaData, 0, allDistricts.Where(x => x.valdistriktstyp=="uppsamlingsdistrikt"), popularParties);
+            if (levelUppsamling >= 0)
+            {
+                Console.WriteLine("\nUppsamling\n");
+                AnalyzeAndPrintVotes(metaData, levelUppsamling, allDistricts.Where(x => x.valdistriktstyp == "uppsamlingsdistrikt"), popularParties);
+            }
 
             Console.WriteLine("\nSeats\n");
             AnalyzeAndPrintMandates(metaData, votesData, popularParties);
