@@ -1,4 +1,5 @@
 ﻿using CommandLine;
+using System.Collections.Generic;
 using System.Data;
 
 namespace Qaplix.Val;
@@ -36,6 +37,7 @@ public static class Program
     public static async Task Run(Options options)
     {
         var metaDataLoader = new ElectionMetaDataLoader();
+
         var indexFile = new IndexFile(new Uri(options.Uri!), options.BasePath!);
         bool first = true;
         do
@@ -43,6 +45,8 @@ public static class Program
             if (await indexFile.RefreshAsync() || first)
             {
                 first = false;
+                var metaData = metaDataLoader.Elections[options.Election!];
+
                 Console.WriteLine($"Updating @ {DateTime.Now.ToLongTimeString()}");
                 (var voteMap, var seatMap) = await FetchAndProcess(indexFile, options.VoteCountOccasion!);
 
@@ -50,7 +54,13 @@ public static class Program
                     .Where(x => x.valtyp == options.Election)
                     .SelectMany(x => x.valdistrikt);
 
-                var metaData = metaDataLoader.Elections[options.Election!];
+                //var election18 = new Election2018();
+                //foreach (var district in votes.Where(x => x.valdistriktstyp=="uppsamlingsdistrikt"))
+                //{
+                //    var votes18 = election18.Map18to22[district.valdistriktskod].Sum(x => election18.Votes[x].Sum(x => x.Value));
+                //    var votes22 = district.rostfordelning.rosterPaverkaMandat.antalRoster;
+                //    Console.WriteLine($"{district.namn} {votes22} ({votes18})");
+                //}
 
                 AnalyzeAndPrint(metaData, options.Level, votes, options.UseWednesdayVotes, options.LevelUppsamling);
                 Console.WriteLine($"Updated @ {DateTime.Now.ToLongTimeString()}");
@@ -190,7 +200,6 @@ public static class Program
         return (voteMap, seatMap);
     }
 
-    record VotesData(Dictionary<string, int> PartyVotes, int TotalVotes, int TotalDistricts, int CountedDistricts);
     private static VotesData CalcVotes(IEnumerable<Valdistrikt> districts)
     {
         var votecount = districts.SelectMany(y => y.rostfordelning?.rosterPaverkaMandat.partiRoster ?? Enumerable.Empty<Partiroster>());
