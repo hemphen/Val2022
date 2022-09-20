@@ -10,7 +10,7 @@ public static class Program
     {
         [Option('w', "wednesday", Default = false, Required = false, HelpText = "Use wednesday votes from 2018 for uppsamlingsdistrikt.")]
         public bool UseWednesdayVotes { get; set; }
-        [Value(0, Default = "preliminär", Required = false, HelpText = "Use a specific räkningstillfälle, e.g. preliminär/slutlig.")]
+        [Value(0, Default = "slutlig", Required = false, HelpText = "Use a specific räkningstillfälle, e.g. preliminär/slutlig.")]
         public string? VoteCountOccasion { get; set; }
         [Option('f', "follow", Default = false, Required = false, HelpText = "Follow changes over time by re-running the analysis.")]
         public bool DoFollow { get; set; }
@@ -123,14 +123,15 @@ public static class Program
             PrintCount(CalcVotes(region), parties, granularity.Names[region.Key]);
         }
 
-        PrintCount(CalcVotes(districts), parties, "TOTALT");
+        PrintCount(CalcVotes(districts), parties, "TOTALT", false);
+        PrintCount(CalcVotes(districts), parties, "OF VALID");
     }
 
     private static void AnalyzeAndPrintMandates(ElectionMetaData metaData, VotesData votesData, IEnumerable<PartyData> parties)
     {
         double DelningsTal(int numSeats) => numSeats == 0 ? 1.2 : numSeats * 2 + 1;
 
-        var eligibleParties = votesData.PartyVotes.Where(x => x.Value / (double)votesData.TotalVotes > 0.04);
+        var eligibleParties = votesData.PartyVotes.Where(x => x.Value / (double)votesData.ValidVotes > 0.04);
         var seats = eligibleParties.ToDictionary(x => x.Key, x => 0);
         if (seats.Count == 0)
         {
@@ -175,9 +176,10 @@ public static class Program
         {
             var votes = votesData.PartyVotes.Where(x => item.PartyCodes.Contains(x.Key)).Sum(x => x.Value);
             var mandat = seats.Where(x => item.PartyCodes.Contains(x.Key)).Sum(x => x.Value);
-            Console.WriteLine($"{item.Block}: {votes / (double)votesData.TotalVotes:#.00%} ({mandat})");
+            Console.WriteLine($"{item.Block}: {votes / (double)votesData.ValidVotes:#.00%} ({mandat})");
         };
     }
+
     static async Task<(Dictionary<string, RostData>, Dictionary<string, MandatData>)> FetchAndProcess(IndexFile baseUri, string rakningstillfalle)
     {
         var voteMap = new Dictionary<string, RostData>();
@@ -207,9 +209,11 @@ public static class Program
         var countedDistricts = districts.Count(x => !string.IsNullOrEmpty(x.rapporteringsTid));
         var numDistricts = districts.Count();
 
-        var totalVotes = votecount.Sum(x => x.antalRoster) + districts.Sum(x => x.rostfordelning?.rosterEjPaverkaMandat.antalRoster ?? 0);
+        var validVotes = votecount.Sum(x => x.antalRoster);
+        var invalidVotes = districts.Sum(x => x.rostfordelning?.rosterEjPaverkaMandat.antalRoster ?? 0);
+        var eligibleVoters = districts.Where(x => x.rostfordelning!=null).Sum(x => x.antalRostberattigade ?? 0);
 
-        return new VotesData(partyVotes, totalVotes, numDistricts, countedDistricts);
+        return new VotesData(partyVotes, validVotes, invalidVotes, eligibleVoters, numDistricts, countedDistricts);
     }
 
     private static VotesData AdjustForOnsdagsVotes2018(VotesData votesData)
@@ -222,9 +226,9 @@ public static class Program
 
         var modifiedPartyVotes = votesData.PartyVotes
             .ToDictionary(x => x.Key, x => x.Value + (onsdagsVotes.TryGetValue(x.Key, out var adjustment) ? adjustment : 0));
-        var modifiedTotalVotes = votesData.TotalVotes + onsdagsVotes.Values.Sum();
+        var modifiedTotalVotes = votesData.ValidVotes + onsdagsVotes.Values.Sum();
 
-        return votesData with { PartyVotes = modifiedPartyVotes, TotalVotes = modifiedTotalVotes };
+        return votesData with { PartyVotes = modifiedPartyVotes, ValidVotes = modifiedTotalVotes };
     }
 
     private static void PrintHeader(IEnumerable<PartyData> parties)
@@ -237,14 +241,18 @@ public static class Program
         Console.WriteLine("|");
     }
 
-    private static void PrintCount(VotesData votesData, IEnumerable<PartyData> parties, string header)
+    private static void PrintCount(VotesData votesData, IEnumerable<PartyData> parties, string header, bool onlyValidVotes = true)
     {
+        var totalVotes = votesData.ValidVotes + votesData.InvalidVotes;
+        var percentBase = onlyValidVotes ? votesData.ValidVotes : totalVotes ;
         Console.Write($"{header,20}");
         foreach (var party in parties)
         {
-            Console.Write($"|{(votesData.PartyVotes.TryGetValue(party.Code, out var voteCount) ? voteCount / (double)votesData.TotalVotes : 0),7:#.0%} ");
+            Console.Write($"|{(votesData.PartyVotes.TryGetValue(party.Code, out var voteCount) ? voteCount / (double)percentBase : 0),7:#.0%} ");
         }
-        Console.WriteLine($"| {votesData.CountedDistricts,4}/{votesData.TotalDistricts,4}");
+        Console.Write($"| {votesData.CountedDistricts,4}/{votesData.TotalDistricts,4} ");
+        Console.Write($"| {(double)totalVotes/votesData.EligibleVoters:#.0%} ");
+        Console.WriteLine("|");
     }
 
 }

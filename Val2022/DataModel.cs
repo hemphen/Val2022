@@ -1,6 +1,6 @@
 ﻿namespace Qaplix.Val;
 
-record VotesData(Dictionary<string, int> PartyVotes, int TotalVotes, int TotalDistricts, int CountedDistricts);
+record VotesData(Dictionary<string, int> PartyVotes, int ValidVotes, int InvalidVotes, int EligibleVoters, int TotalDistricts, int CountedDistricts);
 
 public class RostData
 {
