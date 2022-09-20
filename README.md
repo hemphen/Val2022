@@ -1,7 +1,7 @@
 # Val2022
 
 This tool downloads the results from the Swedish general election in 2022 (_allmänt val till riksdag,
-regionsfullmäktige och kommunfullmäktige i Sverige) from
+regionsfullmäktige och kommunfullmäktige i Sverige_) from
 the Swedish election authority (_Valmyndigheten_, [https://www.val.se/](https://val.se/)) 
 using best practice methods to limit bandwith usage. The downloading
 code is relatively stable. Depending on the stability of the authority's API
